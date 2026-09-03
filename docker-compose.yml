@@ -1,0 +1,65 @@
+name: omni-scope-v1 
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-paper_search}
+      POSTGRES_USER: ${POSTGRES_USER:-paper_search}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-15433}:5432"
+    volumes:
+      - paper-search-db:/var/lib/postgresql/data
+      - ./migrations/001_init.sql:/docker-entrypoint-initdb.d/001_init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  grobid:
+    image: lfoppiano/grobid:0.8.1
+    ports:
+      - "127.0.0.1:${GROBID_PORT:-8071}:8070"
+
+  api:
+    build: .
+    environment: &app-env
+      DATABASE_URL: postgresql+psycopg://${POSTGRES_USER:-paper_search}:${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}@postgres:5432/${POSTGRES_DB:-paper_search}
+      PAPER_SEARCH_API_KEY: ${PAPER_SEARCH_API_KEY:-change-me}
+      PAPER_SEARCH_DATA_DIR: /data/papers
+      GROBID_URL: http://grobid:8070
+      EMBEDDING_BACKEND: ${EMBEDDING_BACKEND:-hashing}
+      EMBEDDING_MODEL: ${EMBEDDING_MODEL:-BAAI/bge-m3}
+      EMBEDDING_DIM: ${EMBEDDING_DIM:-1024}
+      EMBEDDING_DEVICE: ${EMBEDDING_DEVICE:-cpu}
+      HF_HOME: /models-cache
+    depends_on:
+      postgres:
+        condition: service_healthy
+      grobid:
+        condition: service_started
+    ports:
+      - "${PAPER_SEARCH_PORT:-8088}:8088"
+    volumes:
+      - ${PAPER_SEARCH_HOST_DATA_DIR:-./data}:/data/papers
+      - paper-search-model-cache:/models-cache
+    command: ["uvicorn", "omni-scope-v1 .main:app", "--host", "0.0.0.0", "--port", "8088"]
+
+  worker:
+    build: .
+    environment: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      grobid:
+        condition: service_started
+    volumes:
+      - ${PAPER_SEARCH_HOST_DATA_DIR:-./data}:/data/papers
+      - paper-search-model-cache:/models-cache
+    command: ["python", "-m", "omni-scope-v1 .worker"]
+
+volumes:
+  paper-search-db:
+  paper-search-model-cache:
